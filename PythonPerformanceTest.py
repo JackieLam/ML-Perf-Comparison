@@ -12,27 +12,28 @@ from scipy.sparse import csr_matrix, isspmatrix
 from PythonMemoryMeasure import PythonMemoryMeasure
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from CSVHelper import readFromParamFiles, writeResultCSV
-
-PARAM_CNT = -1
+from CSVHelper import readFromParamFile, writeResultCSV
 
 class PythonPerformanceTest(object):
 	def __init__(self, RESULT_CSV, JSON_LIST):
 		self.RESULT_CSV = RESULT_CSV
-		json_string = JSON_LIST
-		self.JSON_LIST = json_string.split(',')
+		self.JSON_LIST = JSON_LIST
 
-	def setUp(self):
-		global PARAM_CNT
-		PARAM_CNT += 1 # JSON file counter
+	# Param dataType should be 'Pandas', 'Numpy' or 'DMatrix'
+	# If dataType = 'DMatrix', store self.dtrain and self.dtest
+	# If dataType = 'Pandas' or 'Numpy', store self.data, self.label, 
+	# self.testData and self.testLabel
+	def setUp(self, dataType):
+		assert(dataType in ('Pandas', 'Numpy', 'DMatrix')), \
+			"DataType should be either 'Pandas', 'Numpy' or 'DMatrix'"
 		# Read parameters from file
 		print self.JSON_LIST
-		params_l = readFromParamFiles(self.JSON_LIST)
-		params = params_l[PARAM_CNT]
+		params = readFromParamFile(self.JSON_LIST)
 
 		# Read CSV and calculate time
 		stTime = time.time()
-		ds = pd.read_csv(params['dataset_file'])
+		ds = pd.read_csv(params['dataset_file'], 
+			nrows=params['nrows'] if 'nrows' in params else None)
 		print ds.head()
 		edTime = time.time()
 		self.dataSetName = params['dataset_file']
@@ -53,12 +54,11 @@ class PythonPerformanceTest(object):
 		st = time.time()
 		dummiesCol_l = []
 		for col in params['onehot_col']:
-			print col
 			dummiesCol = pd.get_dummies(ds[col], prefix = col)
 			dummiesCol_l.append(dummiesCol)
 			ds = ds.drop(columns=col) # FixBug
-		et = time.time()
-		print('takes %f sec to do one hot encoding' % (et - st))
+		mt = time.time()
+		print('takes %f sec to do one hot encoding' % (mt - st))
 
 		# Normalize Data
 		if len(params['norm_col']) > 0:
@@ -68,35 +68,46 @@ class PythonPerformanceTest(object):
 			# scaler = preprocessing.MinMaxScaler()
 			nor_col = scaler.fit_transform(nor_col)
 			ds = pd.DataFrame(nor_col)
-		
+		nor_col = None # Fix
+
 		# Concat the One-hot DF with Norm DF
-		for dummiesCol in dummiesCol_l:
-			ds[list(dummiesCol.dtypes.index)] = dummiesCol
-		ds['y'] = label_ds
+		print "len(dummiesCol_l) : ", len(dummiesCol_l)
+		for dummiesCol in dummiesCol_l: # TODO: this would cost a long time
+			print "size of dummy : ", dummiesCol.shape
+			st1 = time.time()
+			ds = ds.join(dummiesCol)
+			#ds[list(dummiesCol.dtypes.index)] = dummiesCol
+			et1 = time.time()
+			print('takes %f sec to join one dummy' % (et1 - st1))
+		ds[target_column] = label_ds
+		dummiesCol_l = None # Fix
+		et = time.time()
+		print('takes %f sec to do one hot encoding' % (et - mt))
 		
 		n_train = int(math.ceil(ds.shape[0]*params['train_percent']))
 
-		label_ds = ds[['y']].iloc[0:n_train]
-		data_ds = ds.drop(columns=['y']).iloc[0:n_train]
-	   
-		self.testData = ds.drop(data_ds.index).drop(columns=['y']).values
-		self.testLabel = ds.drop(label_ds.index)[['y']].values[:,0]
-		self.label = label_ds.values[:,0]
-		self.data = data_ds.values
-
-		self.testLabel[self.testLabel < 0] = 0 # Deal with special case -1/1
-		self.label[self.label < 0] = 0
-
+		# Decide dataType to use
+		self.data = ds.drop(columns=[target_column]).iloc[0:n_train]
+		self.label = ds[[target_column]].iloc[0:n_train]
+		self.testData = ds.drop(self.data.index).drop(columns=[target_column])
+		self.testLabel = ds.drop(self.label.index)[[target_column]]
+		ds = None
+		if dataType == 'Pandas':
+			pass
+		elif dataType == 'Numpy':
+			self.data = self.data.values
+			self.label = self.label.values[:,0]
+			self.testData = self.testData.values
+			self.testLabel = self.testLabel.values[:,0]
+		else: # DMatrix
+			self.dtrain = xgb.DMatrix(self.data, self.label)
+			self.dtest = xgb.DMatrix(self.testData, self.testLabel)
+	   	
 		# Convert to sparse matrix
 		if params['sparse']:
-			self.data = csr_matrix(self.data)
+			assert(dataType == 'Numpy'), "Only Numpy could use sparse matrix"
+			self.data = csr_matrix(self.data) #TODO: sparse matrix: only numpy could handle this?
 		
-		ds = None
-		data_ds = None
-		label_ds = None
-		nor_col = None
-		dummiesCol_l = None
-
 		self.dataSetMem = PythonMemoryMeasure().initMem
 		print "dataSet Memory : ", self.dataSetMem
 

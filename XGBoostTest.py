@@ -8,38 +8,38 @@ from sklearn import preprocessing
 import numpy as np
 np.set_printoptions(threshold=np.inf)
 import pandas as pd
+from collections import OrderedDict
 from scipy.sparse import csr_matrix, isspmatrix
 from PythonMemoryMeasure import PythonMemoryMeasure
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from CSVHelper import readFromParamFiles, writeResultCSV
+from CSVHelper import readFromParamFile, writeResultCSV
 from PythonPerformanceTest import PythonPerformanceTest
 
 PARAM_CNT = -1
 
 '''self variables: should store all the best parameters'''
 class XGBoostTest(PythonPerformanceTest):
-    def __init__(self, RESULT_CSV, JSON_LIST, num_round=None):
-        super(XGBoostTest, self).__init__(RESULT_CSV, JSON_LIST)
+    def __init__(self, outputfile, jsonfile, num_round=None):
+        super(XGBoostTest, self).__init__(outputfile, jsonfile)
         num_round = 100 if num_round is None else num_round
         self.default_params = {'silent':1, 'objective':'binary:logistic', 'booster':'gbtree', 'eval_metric':['auc','error','logloss'], 
               'n_estimators': num_round, 'max_depth': 6, 'min_child_weight': 1.0, 'gamma': 0.0, 'subsample': 1.0,
               'colsample_bytree': 1.0, 'reg_alpha': 0.0, 'eta': 0.3}
         self.best_params = self.default_params
         self.setUp() # Load Data
-        writeResultCSV(self.RESULT_CSV, [], ['Mode','MemUse','TrainTime', 'PredictTime'
-                                              'TestErr','TestAUC','TestObj'])
+        writeResultCSV(self.RESULT_CSV, [], ['Mode','MemUse','TrainTime','PredictTime',
+                                             'SaveModelTime','TestErr','TestAUC','TestObj'])
 
     def setUp(self):
-        super(XGBoostTest, self).setUp() # Load data
-        
-        dtrain = xgb.DMatrix(self.data, self.label)
-        eval_set = xgb.cv(self.default_params, dtrain, 
+        super(XGBoostTest, self).setUp(dataType='DMatrix') # Load data 
+        eval_set = xgb.cv(self.default_params, self.dtrain, 
                 num_boost_round=self.default_params['n_estimators'], nfold=5,
                 metrics={'error', 'auc', 'logloss'}, seed=0)
         self.bestErr = eval_set['test-error-mean'].iloc[-1] # bestErr: default params
 
-    def train_predict(self, params=None, predict=False):
+    def train_predict(self, params=None, predict=False, 
+                            savemodel=False, getscore=False):
         if params == None: #params: None then train using best param
             params = self.best_params
             tpparams = {"self.best_params": "..."}
@@ -55,12 +55,10 @@ class XGBoostTest(PythonPerformanceTest):
         memThread = threading.Thread(target = mem)
         try:
             memThread.start()
-            dtrain = xgb.DMatrix(self.data, label=self.label)
-            dtest = xgb.DMatrix(self.testData, label=self.testLabel)
             evals = {}
-            watchlist = [(dtest, 'eval'), (dtrain, 'train')]
+            watchlist = [(self.dtest, 'eval'), (self.dtrain, 'train')]
             stTrain = time.time()
-            bst = xgb.train(params, dtrain, num_round, watchlist, evals_result=evals) # train and predict
+            bst = xgb.train(params, self.dtrain, num_round, watchlist, evals_result=evals, verbose_eval = 0) # train and predict
             etTrain = time.time()
         finally:
             mem.stop = True
@@ -72,12 +70,35 @@ class XGBoostTest(PythonPerformanceTest):
         predictTime = -1
         if predict:
             stPredict = time.time()
-            preds = bst.predict(dtest)
+            preds = bst.predict(self.dtest)
             etPredict = time.time()
             predictTime = str(etPredict - stPredict)
 
+        # Model Saving
+        saveModelTime = -1
+        if savemodel:
+            modelName = "/XGBoost/model/xgb"
+            for key, value in tpparams.items():
+                modelName += "_%s_%s" % (key, value)
+            modelName += ".model"
+            stModel = time.time()
+            bst.save_model(modelName)
+            etModel = time.time()
+            saveModelTime = str(etModel - stModel)
+
+        # Get Importance (Score)
+        if getscore:
+            rows = [['IMPORTANCE WEIGHT']]
+            imp_weight = bst.get_score(importance_type='weight') # 'gain', 'cover' or 'weight'
+            imp_weight = sorted(imp_weight.items(), key=lambda kv: kv[1], reverse=True)
+            print type(imp_weight)
+            print imp_weight
+            for key, value in imp_weight[:10]:
+                rows.append([key, value])
+            writeResultCSV(self.RESULT_CSV, rows)
+
         # Write CSV
-        rows = [['Train+Test', totalMem, trainingTime, predictTime, evals['eval']['error'][-1],
+        rows = [['Train+Test', totalMem, trainingTime, predictTime, saveModelTime, evals['eval']['error'][-1],
                  evals['eval']['auc'][-1], evals['eval']['logloss'][-1]]]
         for param, value in tpparams.items():
             rows[0].append("%s=%s" % (param, value))
@@ -98,8 +119,7 @@ class XGBoostTest(PythonPerformanceTest):
         memThread = threading.Thread(target = mem)
         try:
             memThread.start()
-            dtrain = xgb.DMatrix(self.data, self.label)
-            eval_set = xgb.cv(params, dtrain,num_boost_round=num_round, nfold=5,
+            eval_set = xgb.cv(params, self.dtrain,num_boost_round=num_round, nfold=5,
                               metrics={'error', 'auc', 'logloss'}, seed=0)
         finally:
             mem.stop = True
